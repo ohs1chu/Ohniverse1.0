@@ -9,6 +9,7 @@ import dropbox
 from dotenv import load_dotenv
 from flask import Flask, request
 from openai import OpenAI
+from dropbox_auth import create_dropbox_client, safe_error_code, user_error_message
 
 load_dotenv()
 
@@ -28,16 +29,13 @@ if not TELEGRAM_BOT_TOKEN:
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY 가 없습니다.")
 
-if not DROPBOX_ACCESS_TOKEN:
-    raise ValueError("DROPBOX_ACCESS_TOKEN 이 없습니다.")
-
 if not PUBLIC_URL:
     raise ValueError("PUBLIC_URL 이 없습니다. Render 서비스 URL을 넣어주세요.")
 
 os.makedirs(SAVE_PATH, exist_ok=True)
 
 client = OpenAI(api_key=OPENAI_API_KEY)
-dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+dbx = create_dropbox_client(dropbox.Dropbox)
 
 app = Flask(__name__)
 
@@ -77,7 +75,7 @@ def set_telegram_webhook():
         "setWebhook",
         {
             "url": webhook_url,
-            "drop_pending_updates": "true",
+            "drop_pending_updates": "false",
         },
     )
 
@@ -243,28 +241,32 @@ def upload_to_dropbox(filename: str, markdown: str, note_type: str) -> str:
 
 
 def process_text_message(chat_id: int, user_text: str):
-    send_telegram_message(chat_id, "정리 중...")
-
-    analyzed = analyze_with_gpt(user_text)
-    title = analyzed.get("title", "무제 메모")
-    note_type = normalize_note_type(analyzed.get("note_type", "inbox"))
-
-    filename = sanitize_filename(
-        f"{datetime.now().strftime('%Y-%m-%d_%H%M%S')}_{title}"
-    ) + ".md"
-
-    markdown = build_markdown(analyzed, user_text)
-
-    local_path = os.path.join(SAVE_PATH, filename)
-    with open(local_path, "w", encoding="utf-8") as f:
-        f.write(markdown)
-
-    dropbox_path = upload_to_dropbox(filename, markdown, note_type)
-
-    send_telegram_message(
-        chat_id,
-        f"저장 완료 📁\n제목: {title}\n분류: {note_type}\nDropbox 경로: {dropbox_path}",
-    )
+    stage = 'telegram_status'
+    try:
+        send_telegram_message(chat_id, "정리 중...")
+        stage = 'gpt_analysis'
+        analyzed = analyze_with_gpt(user_text)
+        title = analyzed.get("title", "무제 메모")
+        note_type = normalize_note_type(analyzed.get("note_type", "inbox"))
+        filename = sanitize_filename(
+            f"{datetime.now().strftime('%Y-%m-%d_%H%M%S')}_{title}"
+        ) + ".md"
+        markdown = build_markdown(analyzed, user_text)
+        stage = 'local_save'
+        local_path = os.path.join(SAVE_PATH, filename)
+        with open(local_path, "w", encoding="utf-8") as f:
+            f.write(markdown)
+        stage = 'dropbox_upload'
+        dropbox_path = upload_to_dropbox(filename, markdown, note_type)
+        stage = 'telegram_reply'
+        send_telegram_message(chat_id,
+            f"저장 완료 📁\n제목: {title}\n분류: {note_type}\nDropbox 경로: {dropbox_path}")
+    except Exception as error:
+        print(f'processing_failed stage={stage} code={safe_error_code(error)}', flush=True)
+        try:
+            send_telegram_message(chat_id, user_error_message(stage, error))
+        except Exception as reply_error:
+            print(f'error_reply_failed code={safe_error_code(reply_error)}', flush=True)
 
 
 @app.route("/")
@@ -297,9 +299,8 @@ def webhook():
 
     try:
         process_text_message(chat_id, user_text.strip())
-    except Exception as e:
-        print("에러 발생:", e)
-        send_telegram_message(chat_id, f"에러 발생: {e}")
+    except Exception as error:
+        print(f'webhook_failed code={safe_error_code(error)}', flush=True)
 
     return "ok"
 
