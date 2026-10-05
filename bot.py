@@ -3,7 +3,8 @@ import json
 import re
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+from memory_rules import RULES, normalize_memory, render_memory
 
 import dropbox
 from dotenv import load_dotenv
@@ -118,7 +119,7 @@ def normalize_note_type(note_type: str) -> str:
 
 
 def build_markdown(data: dict, original_text: str) -> str:
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    now = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M")
 
     title = data.get("title", "무제 메모").strip()
     summary = data.get("summary", "").strip()
@@ -135,10 +136,10 @@ def build_markdown(data: dict, original_text: str) -> str:
         f"- {item}" for item in action_items if isinstance(item, str) and item.strip()
     ) or "- 없음"
 
-    tags_yaml = ", ".join(tags)
+    tags_yaml = ", ".join(json.dumps(tag, ensure_ascii=False) for tag in tags)
 
     md = f"""---
-title: "{title}"
+title: {json.dumps(title, ensure_ascii=False)}
 created: "{now}"
 source: "telegram"
 note_type: "{note_type}"
@@ -159,7 +160,7 @@ tags: [{tags_yaml}]
 ## 원문
 {original_text}
 """
-    return md
+    return md + render_memory(data)
 
 
 def analyze_with_gpt(user_text: str) -> dict:
@@ -193,6 +194,8 @@ note_type 분류 기준:
 - note_type은 반드시 idea, work, journal, todo, inbox 중 하나만
 - 출력은 반드시 JSON 객체 하나만
 
+{RULES}
+
 입력 텍스트:
 {user_text}
 """
@@ -206,9 +209,10 @@ note_type 분류 기준:
 
     try:
         data = json.loads(text)
+        data = normalize_memory(data)
         data["note_type"] = normalize_note_type(data.get("note_type", "inbox"))
         return data
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, ValueError, TypeError):
         return {
             "title": "메모 정리 실패",
             "summary": "모델 응답을 JSON으로 해석하지 못했습니다.",
@@ -249,7 +253,7 @@ def process_text_message(chat_id: int, user_text: str):
         title = analyzed.get("title", "무제 메모")
         note_type = normalize_note_type(analyzed.get("note_type", "inbox"))
         filename = sanitize_filename(
-            f"{datetime.now().strftime('%Y-%m-%d_%H%M%S')}_{title}"
+            f"{datetime.now(timezone(timedelta(hours=9))).strftime('%Y-%m-%d_%H%M%S')}_{title}"
         ) + ".md"
         markdown = build_markdown(analyzed, user_text)
         stage = 'local_save'
@@ -298,7 +302,7 @@ def webhook():
         return "ok"
 
     try:
-        process_text_message(chat_id, user_text.strip())
+        process_text_message(chat_id, user_text)
     except Exception as error:
         print(f'webhook_failed code={safe_error_code(error)}', flush=True)
 
